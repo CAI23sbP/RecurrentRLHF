@@ -280,7 +280,8 @@ class RecurrentPreferenceModel(nn.Module):
             rews = util.safe_to_tensor(rews_np).to(self.ensemble_model.device)
 
         else:
-            hidden_state = hidden_state[self.member_indx].swapaxes(0,1)
+            if len(hidden_state.shape)>3:
+                hidden_state = hidden_state[self.member_indx].swapaxes(0,1)
             preprocessed = self.model.preprocess(state, action, next_state, done, hidden_state)
             rews, _ = self.model(*preprocessed)
             assert rews.shape == (len(state),)
@@ -395,7 +396,6 @@ class RecurrentRandomFragmenter(preference_comparisons.Fragmenter):
             else:
                 start = self.rng.integers(0, n - fragment_length, endpoint=True)
                 end = start + fragment_length
-            print(traj.hidden_states.shape)
             terminal = (end == n) and traj.terminal
             fragment = RecurrentTrajectoryWithRew(
             obs=traj.obs[start : end + 1],

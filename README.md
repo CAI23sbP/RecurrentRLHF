@@ -48,7 +48,7 @@ https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/ed2f1cf2-7529-4fce-a4
 
 ## My sister project (related to GRU) ## 
 
-GRU-PPO for stable-baselines3 
+GRU-PPO for stable-baselines3 (or contrib) library
 
 https://github.com/CAI23sbP/GRU_AC/tree/master
 

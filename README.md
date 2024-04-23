@@ -1,7 +1,6 @@
  Custom imitation library for making a RecurrentReward model. 
  I used GRU. 
  
- [Note] We apply a variable horizon setting for a robotic task 
  
 
 ## How to Train ## 

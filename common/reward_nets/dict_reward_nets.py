@@ -140,8 +140,8 @@ class DictRewardEnsemble(RewardEnsemble):
         done: np.ndarray,
         **kwargs,
     ) -> np.ndarray:
-        for key in state.keys():
-            batch_size = state.shape[key][0]
+        for key, item in state.items():
+            batch_size = item.shape[0]
         rewards_list = [
             member.predict_processed(state, action, next_state, done, **kwargs)
             for member in self.members
@@ -160,8 +160,8 @@ class DictRewardEnsemble(RewardEnsemble):
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray]:
         
-        for key in state.keys():
-            batch_size = state.shape[key][0]
+        for key, item in state.items():
+            batch_size = item.shape[0]
         all_rewards = self.predict_processed_all(
             state,
             action,

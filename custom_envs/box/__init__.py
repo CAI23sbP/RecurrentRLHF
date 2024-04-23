@@ -1,2 +1,3 @@
 from .fixed_horizon_bipedalwalker_v1 import FHBipedalWalker_v1
 from .fixed_horizon_bipedalwalker_v2 import FHBipedalWalker_v2
+from .variable_horizon_bipedalwalker_v1 import VHBipedalWalker_v1

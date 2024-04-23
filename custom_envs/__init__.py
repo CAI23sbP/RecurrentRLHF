@@ -14,3 +14,8 @@ registration.register(
     id='FHContinuous_MountainCarEnv-v0',
     entry_point='custom_envs.classic_control:FHContinuous_MountainCarEnv',
 )
+
+registration.register(
+    id = 'VHBipedalWalker-v1',
+    entry_point='custom_envs.box:VHBipedalWalker_v1'
+)

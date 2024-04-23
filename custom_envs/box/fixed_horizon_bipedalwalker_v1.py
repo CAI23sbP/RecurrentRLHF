@@ -31,10 +31,11 @@ class FHBipedalWalker_v1(BipedalWalker):
                 self.absorb_reward = rew
         else:
             obs = self.absorb_obs_this_episode
-            rew = self.absorb_reward
+            rew = 0
             info = {}
             
             if self.render_mode == "human":
                 self.render()
                 
         return obs, rew, False, False, info
+

@@ -2,14 +2,14 @@ import gymnasium  as gym
 import torch as th 
 import numpy as np 
 import torch.nn as nn 
-from typing import  cast, Tuple, Iterable, Type
+from typing import  cast, Tuple, Iterable, Type, Optional
 
 import gymnasium as gym
 import numpy as np
 from stable_baselines3.common import preprocessing
 
 from imitation.util import networks, util
-from imitation.rewards.reward_nets import RewardNet, RewardEnsemble, RewardNetWrapper
+from imitation.rewards.reward_nets import RewardNet, RewardEnsemble, RewardNetWrapper, RewardNetWithVariance, AddSTDRewardWrapper
 from .dict_reward_nets import DictRewardNet
 from stable_baselines3.common.utils import zip_strict
 
@@ -34,8 +34,8 @@ class RecurrentRewardNet(RewardNet):
         n_seq = hidden_state.shape[1]
         features_sequence = features.reshape((n_seq, -1, gru.input_size)).swapaxes(0, 1)
         episode_starts = episode_starts.reshape((n_seq, -1)).swapaxes(0, 1)
-
         if th.all(episode_starts == 0.0):
+
             gru_output, hidden_state = gru(features_sequence, hidden_state)
             gru_output = th.flatten(gru_output.transpose(0, 1), start_dim=0, end_dim=1)
             return gru_output, hidden_state
@@ -318,16 +318,34 @@ class RecurrentNormalizedRewardNet(RecurrentPredictProcessedWrapper):
         assert rew.shape == state.shape[:1]
         return rew, hidden_th
 
+class RecurrentRewardEnsemble(RewardNetWithVariance):
 
-## TODO add recurrent RewardEnsemble
-class RecurrentRewardEnsemble(RewardEnsemble):
+    members: nn.ModuleList
+
     def __init__(
         self,
         observation_space: gym.Space,
         action_space: gym.Space,
         members: Iterable[RewardNet],
     ):
-        super().__init__(observation_space, action_space, members)
+        super().__init__(observation_space, action_space)
+        members = list(members)
+        if len(members) < 2:
+            raise ValueError("Must be at least 2 member in the ensemble.")
+
+        self.members = nn.ModuleList(
+            members,
+        )
+
+        dummy_reward_net = members[0] 
+        self.gru = dummy_reward_net.gru
+        
+        del dummy_reward_net
+
+    @property
+    def num_members(self):
+        """The number of members in the ensemble."""
+        return len(self.members)
 
     def predict_processed_all(
         self,
@@ -336,11 +354,15 @@ class RecurrentRewardEnsemble(RewardEnsemble):
         next_state: np.ndarray,
         done: np.ndarray,
         hidden_states: np.ndarray, 
+        for_batch: bool = True,
         **kwargs,
     ) -> np.ndarray:
         batch_size = state.shape[0]
         rewards_list = []
         hidden_state_list = []
+        
+        if for_batch:
+            hidden_states = hidden_states.swapaxes(1,2)
         for (member, hidden_state) in zip(self.members, hidden_states):
             single_reward, single_hidden_state = member.predict_processed(state, action, next_state, done, hidden_state, **kwargs)
             rewards_list.append(single_reward)
@@ -348,7 +370,6 @@ class RecurrentRewardEnsemble(RewardEnsemble):
 
         rewards: np.ndarray = np.stack(rewards_list, axis=-1)
         hidden_states: np.ndarray = np.stack(hidden_state_list, axis= 0)
-
         assert rewards.shape == (batch_size, self.num_members)
         return rewards, hidden_states
     
@@ -370,12 +391,17 @@ class RecurrentRewardEnsemble(RewardEnsemble):
             next_state,
             done,
             hidden_state,
+            for_batch = False,
             **kwargs,
         )
         mean_reward = all_rewards.mean(-1)
         var_reward = all_rewards.var(-1, ddof=1)
         assert mean_reward.shape == var_reward.shape == (batch_size,)
         return mean_reward, var_reward, all_hiddn_states
+
+    def forward(self, *args) -> th.Tensor:
+        """The forward method of the ensemble should in general not be used directly."""
+        raise NotImplementedError
 
     def predict_processed(
         self,
@@ -400,54 +426,98 @@ class RecurrentRewardEnsemble(RewardEnsemble):
         mean, _, hidden_states = self.predict_reward_moments(state, action, next_state, done, hidden_state, **kwargs)
         return mean, hidden_states
 
-# class DictRecurrentRewardEnsemble(RecurrentRewardEnsemble):    
-#     def predict_processed_all(
-#         self,
-#         state: np.ndarray,
-#         action: np.ndarray,
-#         next_state: np.ndarray,
-#         done: np.ndarray,
-#         hidden_state: np.ndarray, 
-#         **kwargs,
-#     ) -> np.ndarray:
+class DictRecurrentRewardEnsemble(RecurrentRewardEnsemble):    
+    def predict_processed_all(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        hidden_state: np.ndarray, 
+        **kwargs,
+    ) -> np.ndarray:
 
-#         for key in state.keys():
-#             batch_size = state.shape[key][0]
-#         rewards_list = []
-#         hidden_state_list = []
-#         for member in self.members:
-#             single_reward, single_hidden_state = member.predict_processed(state, action, next_state, done, hidden_state, **kwargs)
-#             rewards_list.append(single_reward)
-#             hidden_state_list.append(single_hidden_state)
+        for key, item in state.items():
+            batch_size = item.shape[0]
 
-#         rewards: np.ndarray = np.stack(rewards_list, axis=-1)
+        rewards_list = []
+        hidden_state_list = []
+        for (member, hidden_state) in zip(self.members, hidden_states):
+            single_reward, single_hidden_state = member.predict_processed(state, action, next_state, done, hidden_state, **kwargs)
+            rewards_list.append(single_reward)
+            hidden_state_list.append(single_hidden_state)
 
-#         assert rewards.shape == (batch_size, self.num_members)
-#         return rewards, hidden_states
+        rewards: np.ndarray = np.stack(rewards_list, axis=-1)
+        hidden_states: np.ndarray = np.stack(hidden_state_list, axis= 0)
 
-#     @th.no_grad()
-#     def predict_reward_moments(
-#         self,
-#         state: np.ndarray,
-#         action: np.ndarray,
-#         next_state: np.ndarray,
-#         done: np.ndarray,
-#         hidden_state: np.ndarray,
-#         **kwargs,
-#     ) -> Tuple[np.ndarray, np.ndarray]:
+        assert rewards.shape == (batch_size, self.num_members)
+        return rewards, hidden_states
+    
+    @th.no_grad()
+    def predict_reward_moments(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        hidden_state: np.ndarray,
+        **kwargs,
+    ) -> Tuple[np.ndarray, np.ndarray]:
 
-#         for key in state.keys():
-#             batch_size = state.shape[key][0]
+        for key, item in state.items():
+            batch_size = item.shape[0]
 
-#         all_rewards = self.predict_processed_all(
-#             state,
-#             action,
-#             next_state,
-#             done,
-#             hidden_state,
-#             **kwargs,
-#         )
-#         mean_reward = all_rewards.mean(-1)
-#         var_reward = all_rewards.var(-1, ddof=1)
-#         assert mean_reward.shape == var_reward.shape == (batch_size,)
-#         return mean_reward, var_reward
+        all_rewards, all_hiddn_states = self.predict_processed_all(
+            state,
+            action,
+            next_state,
+            done,
+            hidden_state,
+            **kwargs,
+        )
+        mean_reward = all_rewards.mean(-1)
+        var_reward = all_rewards.var(-1, ddof=1)
+        assert mean_reward.shape == var_reward.shape == (batch_size,)
+        return mean_reward, var_reward, all_hiddn_states
+
+
+class RecurrentAddSTDRewardWrapper(RecurrentPredictProcessedWrapper):
+
+    base: RewardNetWithVariance
+
+    def __init__(self, base: RewardNetWithVariance, default_alpha: float = 0.0):
+        super().__init__(base)
+        if not isinstance(base, RewardNetWithVariance):
+            raise TypeError(
+                "Cannot add standard deviation to reward net that "
+                "is not an instance of RewardNetWithVariance!",
+            )
+
+        self.default_alpha = default_alpha
+        self.gru = base.gru 
+        self.members = base.members
+        # self.num_members = base.num_members
+
+    def predict_processed(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        hidden_state:np.ndarray,
+        alpha: Optional[float] = None,
+        **kwargs,
+    ) -> np.ndarray:
+        del kwargs
+        
+        if alpha is None:
+            alpha = self.default_alpha
+        reward_mean, reward_var, hidden_state = self.base.predict_reward_moments(
+            state,
+            action,
+            next_state,
+            done,
+            hidden_state
+        )
+
+        return reward_mean + alpha * np.sqrt(reward_var), hidden_state

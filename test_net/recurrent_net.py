@@ -63,7 +63,6 @@ class CustomRewardNet(RecurrentRewardNet):
             inputs.append(th.reshape(done, [-1, 1]))
 
         inputs_concat = th.cat(inputs, dim=1)
-
         latent , hidden_state = self._process_sequence(inputs_concat, hidden_state, done, self.gru)
         outputs = self.output_mlp(latent)
         assert outputs.shape == state.shape[:1]

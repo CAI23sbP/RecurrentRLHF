@@ -72,14 +72,17 @@ class RecurrentTrajectoryAccumulator:
                 "Need to first initialize partial trajectory using "
                 "self._traj_accum.add_step({'obs': ob}, key=env_idx)"
             )
-        hidden_states = hidden_states.swapaxes(0,1)
+        if len(hidden_states.shape)> 3: ## ensembling recurrent
+            hidden_states = hidden_states.swapaxes(0,2) # 3, 1, 8, 120 - > 8 , 3 , 1, 120  -> 8, 1, 3, 120
+        else:
+            hidden_states = hidden_states.swapaxes(0,1) # 1, 8, 120 -> 8, 1, 120
+
         zip_iter = enumerate(zip(acts, wrapped_obs, rews, dones, infos, hidden_states))
         for env_idx, (act, ob, rew, done, info, hidden_state) in zip_iter:
             if done:
                 real_ob = maybe_wrap_in_dictobs(info["terminal_observation"])
             else:
                 real_ob = ob
-
             self.add_step(
                 dict(
                     acts=act,
@@ -125,7 +128,12 @@ def flatten_trajectories(
         else:
             infos = traj.infos
         parts["infos"].append(infos)
-        parts["hidden_states"].append(traj.hidden_states)
+
+        if len(traj.hidden_states.shape)> 3:
+            parts["hidden_states"].append(traj.hidden_states.swapaxes(0,2))
+        else:
+            parts["hidden_states"].append(traj.hidden_states)
+
 
     cat_parts = {
         key: concatenate_maybe_dictobs(part_list)

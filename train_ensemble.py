@@ -3,8 +3,8 @@ from test_net.non_recurrent_net import CustomBasicRewardNet
 from imitation.util.networks import RunningNorm
 from imitation.util.util import make_vec_env
 from imitation.policies.base import NormalizeFeaturesExtractor
-from imitation.rewards.reward_nets import NormalizedRewardNet
-from common.reward_nets.recurrent_reward_nets import RecurrentNormalizedRewardNet
+from imitation.rewards.reward_nets import RewardEnsemble, AddSTDRewardWrapper, RewardNet
+from common.reward_nets.recurrent_reward_nets import RecurrentRewardEnsemble, RecurrentAddSTDRewardWrapper
 from custom_preference import CustomPreferenceComparisons, CustomPreferenceModel, CustomRandomFragmenter, CustomSyntheticGatherer
 from stable_baselines3 import PPO
 import numpy as np
@@ -27,8 +27,8 @@ if th.cuda.is_available():
 """
 This is for variable horizon environment(episode)
 """
-VARIABLE_HORIZON= False
-LOG_DIR = '/home/cai/Desktop/GRU_reward/results'
+VARIABLE_HORIZON = False
+LOG_DIR = '/home/cai/Desktop/GRU_reward/ensemble_result'
 N_ENVS = 8
 N_STEPS = int(2048 / N_ENVS)
 BATCH_SIZE = 64
@@ -45,6 +45,7 @@ TOTAL_TIME_STEP = 5_000
 TOTAL_COMPARISION = 600
 QUEUE_SIZE = 100
 OVERSAMPLEING_FACTOR = 5
+ENSEMBLE_SIZE=3
 """
 ENV_NAME:
 
@@ -83,18 +84,30 @@ venv = make_vec_env(ENV_NAME, rng=rng,
                     env_make_kwargs = {'hardcore':HARDCORE} if 'BipedalWalker' in ENV_NAME else None
                     )
 
-reward_net = recurrent_net.CustomRewardNet(
-    venv.observation_space, venv.action_space, normalize_input_layer=RunningNorm
-)
-reward_net = RecurrentNormalizedRewardNet(reward_net, normalize_output_layer= RunningNorm)
+reward_net = recurrent_net.CustomRewardNet(venv.observation_space, venv.action_space)
+
+reward_net_ensemble =  RecurrentRewardEnsemble(venv.observation_space,
+                                            venv.action_space,
+                                            members = [reward_net for _ in range(ENSEMBLE_SIZE)]
+                                            )
+reward_net_ensemble = RecurrentAddSTDRewardWrapper(reward_net_ensemble, 0.0001)
+reward_net_ensemble = reward_net_ensemble.to('cuda')
+preference_model = recurrent_preference.RecurrentPreferenceModel(reward_net_ensemble, allow_variable_horizon = VARIABLE_HORIZON)
+
+gatherer = recurrent_preference.RecurrentSyntheticGatherer(rng=rng, allow_variable_horizon = VARIABLE_HORIZON)
+
 fragmenter = recurrent_preference.RecurrentRandomFragmenter(
     warning_threshold=0,
     rng=rng,
     allow_variable_horizon = VARIABLE_HORIZON
 )
-gatherer = recurrent_preference.RecurrentSyntheticGatherer(rng=rng, allow_variable_horizon = VARIABLE_HORIZON)
-preference_model = recurrent_preference.RecurrentPreferenceModel(reward_net, allow_variable_horizon = VARIABLE_HORIZON)
-reward_trainer = recurrent_preference.RecurrentBasicRewardTrainer(
+active_fragmenter = recurrent_preference.RecurrentActiveSelectionFragmenter(
+    preference_model,
+    fragmenter,
+    fragment_sample_factor= 3,
+)
+
+reward_trainer = recurrent_preference.RecurrentEnsembleTrainer(
     preference_model=preference_model,
     loss=recurrent_preference.RecurrentCrossEntropyRewardLoss(),
     epochs=3,
@@ -115,26 +128,25 @@ agent = PPO(
     gamma=0.97,
     n_epochs=10,
 )
-
 trajectory_generator = recurrent_preference.RecurrentAgentTrainer(
     algorithm=agent,
-    reward_fn=reward_net,
+    reward_fn=reward_net_ensemble,
     venv=venv,
     rng=rng,
 )
 writer_1 = SummaryWriter(os.path.join(LOG_DIR,ENV_NAME,'GRU'))
 pref_comparisons = recurrent_preference.RecurrentPreferenceComparisons(
     trajectory_generator,
-    reward_net,
+    reward_net_ensemble,
     num_iterations=INTERACTION_NUM,  
-    fragmenter=fragmenter,
+    fragmenter=active_fragmenter,
     preference_gatherer=gatherer,
     reward_trainer=reward_trainer,
     fragment_length=CLIP_SIZE,
     transition_oversampling=OVERSAMPLEING_FACTOR,
     initial_comparison_frac=0.1,
     comparison_queue_size= QUEUE_SIZE,
-    allow_variable_horizon=VARIABLE_HORIZON,
+    allow_variable_horizon=True,
     initial_epoch_multiplier=4,
     query_schedule="hyperbolic",
     tensorboard= writer_1
@@ -144,7 +156,7 @@ pref_comparisons.train(
     total_comparisons=TOTAL_COMPARISION,
 )
 
-del pref_comparisons, trajectory_generator, rng, reward_trainer , preference_model, gatherer, fragmenter, venv, reward_net
+del pref_comparisons, trajectory_generator, rng, reward_trainer , preference_model, gatherer, fragmenter, venv, reward_net, reward_net_ensemble, active_fragmenter
 
 rng = np.random.default_rng(0)
 writer_2 = SummaryWriter(os.path.join(LOG_DIR,ENV_NAME,'Non_GRU'))
@@ -156,18 +168,29 @@ venv = make_vec_env(ENV_NAME, rng=rng,
                     )
 
 reward_net = CustomBasicRewardNet(
-    venv.observation_space, venv.action_space, normalize_input_layer=RunningNorm
+    venv.observation_space, venv.action_space
 )
-reward_net = NormalizedRewardNet(reward_net, normalize_output_layer= RunningNorm)
+reward_net_ensemble = RewardEnsemble(venv.observation_space,
+                                            venv.action_space,
+                                            [reward_net for _ in range(ENSEMBLE_SIZE)]
+                                            )
+reward_net_ensemble = AddSTDRewardWrapper(reward_net_ensemble, 0.0001)
+reward_net_ensemble = reward_net_ensemble.to('cuda')
+gatherer = CustomSyntheticGatherer(rng=rng, allow_variable_horizon = VARIABLE_HORIZON)
+preference_model = CustomPreferenceModel(reward_net_ensemble, allow_variable_horizon = VARIABLE_HORIZON)
 
 fragmenter = CustomRandomFragmenter(
     warning_threshold=0,
     rng=rng,
     allow_variable_horizon = VARIABLE_HORIZON
 )
-gatherer = CustomSyntheticGatherer(rng=rng, allow_variable_horizon = VARIABLE_HORIZON)
-preference_model = CustomPreferenceModel(reward_net, allow_variable_horizon = VARIABLE_HORIZON)
-reward_trainer = preference_comparisons.BasicRewardTrainer(
+active_fragmenter = preference_comparisons.ActiveSelectionFragmenter(
+    preference_model,
+    fragmenter,
+    fragment_sample_factor= 3,
+)
+
+reward_trainer = preference_comparisons.EnsembleTrainer(
     preference_model=preference_model,
     loss=preference_comparisons.CrossEntropyRewardLoss(),
     epochs=3,
@@ -191,7 +214,7 @@ agent2 = PPO(
 
 trajectory_generator = preference_comparisons.AgentTrainer(
     algorithm=agent2,
-    reward_fn=reward_net,
+    reward_fn=reward_net_ensemble,
     venv=venv,
     exploration_frac=0.00,
     rng=rng,
@@ -199,15 +222,15 @@ trajectory_generator = preference_comparisons.AgentTrainer(
 
 pref_comparisons = CustomPreferenceComparisons(
     trajectory_generator,
-    reward_net,
+    reward_net_ensemble,
     num_iterations=INTERACTION_NUM,  # Set to 60 for better performance
-    fragmenter=fragmenter,
+    fragmenter=active_fragmenter,
     preference_gatherer=gatherer,
     reward_trainer=reward_trainer,
     fragment_length=CLIP_SIZE,
     transition_oversampling=OVERSAMPLEING_FACTOR,
     initial_comparison_frac=0.1,
-    allow_variable_horizon=VARIABLE_HORIZON,
+    allow_variable_horizon=True,
     comparison_queue_size= QUEUE_SIZE,
     initial_epoch_multiplier=4,
     query_schedule="hyperbolic",
@@ -219,7 +242,7 @@ pref_comparisons.train(
     total_comparisons=TOTAL_COMPARISION,
 )
 
-del pref_comparisons, trajectory_generator, rng, reward_trainer , preference_model, gatherer, fragmenter, venv, reward_net
+del pref_comparisons, trajectory_generator, rng, reward_trainer , preference_model, gatherer, fragmenter, venv, reward_net,  active_fragmenter
 
 import gymnasium as gym 
 
@@ -243,7 +266,7 @@ for index ,(model, writer) in enumerate(zip([agent, agent2],[writer_1, writer_2]
 
     env = RecordVideo(env= env, 
                       video_folder= os.path.join(LOG_DIR, ENV_NAME, f'{VARIABLE_HORIZON}_video'), 
-                      name_prefix= f'GRU_reward_{CLIP_SIZE}' if index == 0 else f"Non_GRU_reward_{CLIP_SIZE}" 
+                      name_prefix= 'GRU_reward' if index == 0 else "Non_GRU_reward" 
                         ) if RECODE_TEST_EP else env
     total_reward = 0
     step = 0

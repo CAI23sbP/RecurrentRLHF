@@ -11,15 +11,17 @@ from common.wrapper.recurrent_buffering_wrapper import RecurrentBufferingWrapper
 from common.data.recurrent_rollout import * 
 from common.data.recurrent_types import RecurrentTrajectoryPair, RecurrentTransitions
 from imitation.util import util
-from imitation.data.types import AnyPath, Pair
+from imitation.data.types import AnyPath, Pair, assert_not_dictobs
 from scipy import special
 from tqdm.auto import tqdm
+import torch.nn as nn 
 import pickle, re, math 
 from imitation.regularization import regularizers
 from torch.utils import data as data_th
 from stable_baselines3.common.type_aliases import MaybeCallback
 from collections import defaultdict
 from imitation.policies import exploration_wrapper
+from common.reward_nets import recurrent_reward_nets
 
 class RecurrentTrajectoryGenerator(preference_comparisons.TrajectoryGenerator):
     def sample(self, steps: int) -> Sequence[RecurrentTrajectoryWithRew]:
@@ -54,7 +56,6 @@ class RecurrentAgentTrainer(RecurrentTrajectoryGenerator):
         exploration_frac: float = 0.0,
         switch_prob: float = 0.5,
         random_prob: float = 0.5,
-        member: int = 1 ,
     ) -> None:
         self.algorithm = algorithm
         super().__init__(custom_logger)
@@ -65,6 +66,10 @@ class RecurrentAgentTrainer(RecurrentTrajectoryGenerator):
                 reward_fn.action_space,
             )
         self.rng = rng
+        try:
+            member = len(reward_fn.members)
+        except AttributeError as e: 
+            member = 1 
 
         self.buffering_wrapper_with_reward_wrapper = RecurrentBufferingWrapper(
             venv = venv,
@@ -187,7 +192,7 @@ def _get_trajectories(
     assert sum(len(traj) for traj in trajectories) >= steps
     return trajectories
 
-class RecurrentPreferenceModel(preference_comparisons.PreferenceModel):
+class RecurrentPreferenceModel(nn.Module):
 
     def __init__(
         self,
@@ -195,8 +200,41 @@ class RecurrentPreferenceModel(preference_comparisons.PreferenceModel):
         noise_prob: float = 0.0,
         discount_factor: float = 1.0,
         threshold: float = 50,
+        allow_variable_horizon : bool = False,
+        member_indx: int = 0 ,
     ) -> None:
-        super().__init__(model, noise_prob, discount_factor, threshold)
+        super().__init__()
+        self.model = model
+        self.noise_prob = noise_prob
+        self.discount_factor = discount_factor
+        self.threshold = threshold
+        base_model = get_base_model(model)
+        self.ensemble_model = None
+        if isinstance(base_model, recurrent_reward_nets.RecurrentRewardEnsemble):
+            is_base = model is base_model
+            is_std_wrapper = (
+                isinstance(model, recurrent_reward_nets.RecurrentAddSTDRewardWrapper)
+                and model.base is base_model
+            )
+
+            if not (is_base or is_std_wrapper):
+                raise ValueError(
+                    "RewardEnsemble can only be wrapped"
+                    f" by AddSTDRewardWrapper but found {type(model).__name__}.",
+                )
+            self.ensemble_model = base_model
+            self.member_pref_models = []
+            for indx ,member in enumerate(self.ensemble_model.members):
+                member_pref_model = RecurrentPreferenceModel(
+                    cast(reward_nets.RewardNet, member),  # nn.ModuleList is not generic
+                    self.noise_prob,
+                    self.discount_factor,
+                    self.threshold,
+                    member_indx = indx
+                )
+                self.member_pref_models.append(member_pref_model)
+        self.allow_variable_horizon = allow_variable_horizon
+        self.member_indx = member_indx
 
     def forward(
         self,
@@ -206,6 +244,7 @@ class RecurrentPreferenceModel(preference_comparisons.PreferenceModel):
         gt_reward_available = _trajectory_pair_includes_reward(fragment_pairs[0])
         if gt_reward_available:
             gt_probs = th.empty(len(fragment_pairs), dtype=th.float32)
+
         for i, fragment in enumerate(fragment_pairs):
             frag1, frag2 = fragment
             trans1 = flatten_trajectories([frag1])
@@ -224,9 +263,9 @@ class RecurrentPreferenceModel(preference_comparisons.PreferenceModel):
     
     def rewards(self, transitions: RecurrentTransitions) -> th.Tensor:
 
-        state = transitions.obs
+        state = assert_not_dictobs(transitions.obs)
         action = transitions.acts
-        next_state = transitions.next_obs
+        next_state = assert_not_dictobs(transitions.next_obs)
         done = transitions.dones
         hidden_state = transitions.hidden_states
         if self.ensemble_model is not None:
@@ -241,10 +280,38 @@ class RecurrentPreferenceModel(preference_comparisons.PreferenceModel):
             rews = util.safe_to_tensor(rews_np).to(self.ensemble_model.device)
 
         else:
+            hidden_state = hidden_state[self.member_indx].swapaxes(0,1)
             preprocessed = self.model.preprocess(state, action, next_state, done, hidden_state)
             rews, _ = self.model(*preprocessed)
             assert rews.shape == (len(state),)
         return rews
+    
+    def probability(self, rews1: th.Tensor, rews2: th.Tensor) -> th.Tensor:
+
+        expected_dims = 2 if self.ensemble_model is not None else 1
+        assert rews1.ndim == rews2.ndim == expected_dims
+        if self.allow_variable_horizon:
+            which_min = min(len(rews2),len(rews1))
+            rews2 = rews2[:which_min]
+            rews1 = rews1[:which_min]
+        if self.discount_factor == 1:
+            returns_diff = (rews2 - rews1).sum(axis=0)  
+        else:
+            device = rews1.device
+            assert device == rews2.device
+            discounts = self.discount_factor ** th.arange(len(rews1), device=device)
+            if self.ensemble_model is not None:
+                discounts = discounts.reshape(-1, 1)
+            returns_diff = (discounts * (rews2 - rews1)).sum(axis=0)
+        returns_diff = th.clip(returns_diff, -self.threshold, self.threshold)
+        model_probability = 1 / (1 + returns_diff.exp())
+        probability = self.noise_prob * 0.5 + (1 - self.noise_prob) * model_probability
+        if self.ensemble_model is not None:
+            assert probability.shape == (self.model.num_members,)
+        else:
+            assert probability.shape == ()
+        return probability
+
 
 def _trajectory_pair_includes_reward(fragment_pair: RecurrentTrajectoryPair) -> bool:
     """Return true if and only if both fragments in the pair include rewards."""
@@ -258,7 +325,9 @@ class RecurrentRandomFragmenter(preference_comparisons.Fragmenter):
         rng: np.random.Generator,
         warning_threshold: int = 10,
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        allow_variable_horizon: bool =  False,
     ) -> None:
+        self.allow_variable_horizon = allow_variable_horizon
         super().__init__(custom_logger)
         self.rng = rng
         self.warning_threshold = warning_threshold
@@ -270,21 +339,24 @@ class RecurrentRandomFragmenter(preference_comparisons.Fragmenter):
         num_pairs: int,
     ) -> Sequence[RecurrentTrajectoryWithRewPair]:
         fragments: List[RecurrentTrajectoryWithRew] = []
-
-        prev_num_trajectories = len(trajectories)
-        trajectories = [traj for traj in trajectories if len(traj) >= fragment_length]
-        if len(trajectories) == 0:
-            raise ValueError(
-                "No trajectories are long enough for the desired fragment length "
-                f"of {fragment_length}.",
-            )
-        num_discarded = prev_num_trajectories - len(trajectories)
-        if num_discarded:
-            self.logger.log(
-                f"Discarded {num_discarded} out of {prev_num_trajectories} "
-                "trajectories because they are shorter than the desired length "
-                f"of {fragment_length}.",
-            )
+        if self.allow_variable_horizon:
+            trajectories = [traj for traj in trajectories]
+        else:           
+            prev_num_trajectories = len(trajectories)
+            trajectories = [traj for traj in trajectories if len(traj) >= fragment_length]
+            
+            if len(trajectories) == 0:
+                raise ValueError(
+                    "No trajectories are long enough for the desired fragment length "
+                    f"of {fragment_length}.",
+                )
+            num_discarded = prev_num_trajectories - len(trajectories)
+            if num_discarded:
+                self.logger.log(
+                    f"Discarded {num_discarded} out of {prev_num_trajectories} "
+                    "trajectories because they are shorter than the desired length "
+                    f"of {fragment_length}.",
+                )
 
         weights = [len(traj) for traj in trajectories]
 
@@ -312,17 +384,28 @@ class RecurrentRandomFragmenter(preference_comparisons.Fragmenter):
                 p=np.array(weights) / sum(weights),
             )
             n = len(traj)
-            start = self.rng.integers(0, n - fragment_length, endpoint=True)
-            end = start + fragment_length
+            if self.allow_variable_horizon:
+                if n>fragment_length:
+                    start = self.rng.integers(0, n - fragment_length, endpoint=True)
+                    end = start + fragment_length
+                else:
+                    start = 0
+                    end = n
+                
+            else:
+                start = self.rng.integers(0, n - fragment_length, endpoint=True)
+                end = start + fragment_length
+            print(traj.hidden_states.shape)
             terminal = (end == n) and traj.terminal
             fragment = RecurrentTrajectoryWithRew(
-                obs=traj.obs[start : end + 1],
-                acts=traj.acts[start:end],
-                infos=traj.infos[start:end] if traj.infos is not None else None,
-                rews=traj.rews[start:end],
-                hidden_states=traj.hidden_states[start:end].swapaxes(0, 1), ## may be checking here for ensembeling
-                terminal=terminal,
+            obs=traj.obs[start : end + 1],
+            acts=traj.acts[start:end],
+            infos=traj.infos[start:end] if traj.infos is not None else None,
+            rews=traj.rews[start:end],
+            hidden_states=traj.hidden_states[start:end].swapaxes(0, 1), ## may be checking here for ensembeling
+            terminal=terminal,
             )
+
             fragments.append(fragment)
         iterator = iter(fragments)
         return list(zip(iterator, iterator))
@@ -331,7 +414,7 @@ class RecurrentRandomFragmenter(preference_comparisons.Fragmenter):
 class RecurrentActiveSelectionFragmenter(preference_comparisons.Fragmenter):
     def __init__(
         self,
-        preference_model: preference_comparisons.PreferenceModel,
+        preference_model: RecurrentPreferenceModel,
         base_fragmenter: preference_comparisons.Fragmenter,
         fragment_sample_factor: float,
         uncertainty_on: str = "logit",
@@ -341,10 +424,11 @@ class RecurrentActiveSelectionFragmenter(preference_comparisons.Fragmenter):
         super().__init__(custom_logger=custom_logger)
         if preference_model.ensemble_model is None:
             raise ValueError(
-                "PreferenceModel not wrapped over an ensemble of networks.",
+                "RecurrentPreferenceModel not wrapped over an ensemble of networks.",
             )
         self.preference_model = preference_model
         self.base_fragmenter = base_fragmenter
+        self.allow_variable_horizon = base_fragmenter.allow_variable_horizon
         self.fragment_sample_factor = fragment_sample_factor
         self._uncertainty_on = uncertainty_on
         if not (uncertainty_on in ["logit", "probability", "label"]):
@@ -386,20 +470,22 @@ class RecurrentActiveSelectionFragmenter(preference_comparisons.Fragmenter):
         return [fragment_pairs[idx] for idx in fragment_idxs[:num_pairs]]
 
     def variance_estimate(self, rews1: th.Tensor, rews2: th.Tensor) -> float:
+        if self.allow_variable_horizon:
+            which_min = min(len(rews1), len(rews2))
+            rews1 ,rews2 = rews1[:which_min], rews2[:which_min]  
+
         if self.uncertainty_on == "logit":
             returns1, returns2 = rews1.sum(0), rews2.sum(0)
             var_estimate = (returns1 - returns2).var().item()
-        else:  # uncertainty_on is probability or label
+        else:  
             probs = self.preference_model.probability(rews1, rews2)
             probs_np = probs.cpu().numpy()
             assert probs_np.shape == (self.preference_model.model.num_members,)
             if self.uncertainty_on == "probability":
                 var_estimate = probs_np.var()
-            elif self.uncertainty_on == "label":  # uncertainty_on is label
+            elif self.uncertainty_on == "label":
                 preds = (probs_np > 0.5).astype(np.float32)
-                # probability estimate of Bernoulli random variable
                 prob_estimate = preds.mean()
-                # variance estimate of Bernoulli random variable
                 var_estimate = prob_estimate * (1 - prob_estimate)
             else:
                 self.raise_uncertainty_on_not_supported()
@@ -415,6 +501,7 @@ class RecurrentSyntheticGatherer(preference_comparisons.PreferenceGatherer):
         rng: Optional[np.random.Generator] = None,
         threshold: float = 50,
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        allow_variable_horizon: bool =  False,
     ) -> None:
         super().__init__(custom_logger=custom_logger)
         self.temperature = temperature
@@ -422,13 +509,12 @@ class RecurrentSyntheticGatherer(preference_comparisons.PreferenceGatherer):
         self.sample = sample
         self.rng = rng
         self.threshold = threshold
+        self.allow_variable_horizon = allow_variable_horizon
 
         if self.sample and self.rng is None:
             raise ValueError("If `sample` is True, then `rng` must be provided.")
         
     def __call__(self, fragment_pairs: Sequence[RecurrentTrajectoryWithRewPair]) -> np.ndarray:
-        ## return label: which one is better (prefer)
-        """Computes probability fragment 1 is preferred over fragment 2."""
         returns1, returns2 = self._reward_sums(fragment_pairs)
         if self.temperature == 0:
             return (np.sign(returns1 - returns2) + 1) / 2
@@ -450,15 +536,18 @@ class RecurrentSyntheticGatherer(preference_comparisons.PreferenceGatherer):
         return model_probs
 
     def _reward_sums(self, fragment_pairs) -> Tuple[np.ndarray, np.ndarray]:
-        rews1, rews2 = zip(
-            *[
-                (
-                    discounted_sum(f1.rews, self.discount_factor),
-                    discounted_sum(f2.rews, self.discount_factor),
-                )
-                for f1, f2 in fragment_pairs
-            ],
-        )
+        rews1 = [] 
+        rews2 = [] 
+        for f1, f2 in fragment_pairs:
+            if self.allow_variable_horizon:
+                which_min = min(len(f1.rews),len(f2.rews))
+                rew_1 =np.array(f1.rews)[:which_min]
+                rew_2 = np.array(f2.rews)[:which_min]
+            else:
+                rew_1 = f1.rews
+                rew_2 = f2.rews
+            rews1.append(discounted_sum(rew_1, self.discount_factor))
+            rews2.append(discounted_sum(rew_2, self.discount_factor))
         return np.array(rews1, dtype=np.float32), np.array(rews2, dtype=np.float32)
 
 class RecurrentPreferenceDataset(preference_comparisons.PreferenceDataset):
@@ -537,14 +626,30 @@ class RecurrentCrossEntropyRewardLoss(preference_comparisons.CrossEntropyRewardL
         preferences: np.ndarray,
         preference_model: preference_comparisons.PreferenceModel,
     ) -> preference_comparisons.LossAndMetrics:
-        return super().forward(fragment_pairs, preferences, preference_model)
+        probs, gt_probs = preference_model(fragment_pairs)
+        predictions = probs > 0.5
+        preferences_th = th.as_tensor(preferences, dtype=th.float32)
+        ground_truth = preferences_th > 0.5
+        metrics = {}
+        metrics["accuracy"] = (predictions == ground_truth).float().mean()
+        if gt_probs is not None:
+            metrics["gt_reward_loss"] = th.nn.functional.binary_cross_entropy(
+                gt_probs,
+                preferences_th,
+            )
+        metrics = {key: value.detach().cpu() for key, value in metrics.items()}
+        return preference_comparisons.LossAndMetrics(
+            loss=th.nn.functional.binary_cross_entropy(probs, preferences_th),
+            metrics=metrics,
+        )
+
     
 class RecurrentBasicRewardTrainer(preference_comparisons.RewardTrainer):
     regularizer: Optional[regularizers.Regularizer]
 
     def __init__(
         self,
-        preference_model: preference_comparisons.PreferenceModel,
+        preference_model: RecurrentPreferenceModel,
         loss: preference_comparisons.RewardLoss,
         rng: np.random.Generator,
         batch_size: int = 32,
@@ -691,7 +796,7 @@ class RecurrentEnsembleTrainer(RecurrentBasicRewardTrainer):
 
     def __init__(
         self,
-        preference_model: preference_comparisons.PreferenceModel,
+        preference_model: RecurrentPreferenceModel,
         loss: preference_comparisons.RewardLoss,
         rng: np.random.Generator,
         batch_size: int = 32,
@@ -703,7 +808,7 @@ class RecurrentEnsembleTrainer(RecurrentBasicRewardTrainer):
     ) -> None:
         if preference_model.ensemble_model is None:
             raise TypeError(
-                "PreferenceModel of a RewardEnsemble expected by EnsembleTrainer.",
+                "RecurrentPreferenceModel of a RewardEnsemble expected by EnsembleTrainer.",
             )
 
         super().__init__(
@@ -776,16 +881,14 @@ class RecurrentEnsembleTrainer(RecurrentBasicRewardTrainer):
             self.logger.record(k, np.mean(v))
             self.logger.record(k + "_std", np.std(v))
 
-
 def get_base_model(reward_model: reward_nets.RewardNet) -> reward_nets.RewardNet:
     base_model = reward_model
     while hasattr(base_model, "base"):
         base_model = cast(reward_nets.RewardNet, base_model.base)
     return base_model
 
-
 def _make_reward_trainer(
-    preference_model: preference_comparisons.PreferenceModel,
+    preference_model: RecurrentPreferenceModel,
     loss: preference_comparisons.RewardLoss,
     rng: np.random.Generator,
     reward_trainer_kwargs: Optional[Mapping[str, Any]] = None,
@@ -861,7 +964,6 @@ class RecurrentPreferenceComparisons(base.BaseImitationAlgorithm):
                 "If you provide your own fragmenter, preference gatherer, "
                 "and reward trainer, you don't need to provide a random state.",
             )
-
         if reward_trainer is None:
             assert self.rng is not None
             preference_model = RecurrentPreferenceModel(reward_model)
@@ -920,7 +1022,6 @@ class RecurrentPreferenceComparisons(base.BaseImitationAlgorithm):
     ) -> Mapping[str, Any]:
         initial_comparisons = int(total_comparisons * self.initial_comparison_frac)
         total_comparisons -= initial_comparisons
-        # Compute the number of comparisons to request at each iteration in advance.
         vec_schedule = np.vectorize(self.query_schedule)
         unnormalized_probs = vec_schedule(np.linspace(0, 1, self.num_iterations))
         probs = unnormalized_probs / np.sum(unnormalized_probs)
@@ -957,7 +1058,6 @@ class RecurrentPreferenceComparisons(base.BaseImitationAlgorithm):
             epoch_multiplier = 1.0
             if i == 0:
                 epoch_multiplier = self.initial_epoch_multiplier
-
             self.reward_trainer.train(self.dataset, epoch_multiplier=epoch_multiplier)
             base_key = self.logger.get_accumulate_prefixes() + "reward/final/train"
             assert f"{base_key}/loss" in self.logger.name_to_value
@@ -965,8 +1065,8 @@ class RecurrentPreferenceComparisons(base.BaseImitationAlgorithm):
             reward_loss = self.logger.name_to_value[f"{base_key}/loss"]
             reward_accuracy = self.logger.name_to_value[f"{base_key}/accuracy"]
             if self.tensorboard is not None: 
-                self.tensorboard.add_scalar('non_gru/loss_final',reward_loss, i)
-                self.tensorboard.add_scalar('non_gru/accuracy_final',reward_accuracy, i)
+                self.tensorboard.add_scalar('gru/loss_final',reward_loss, i)
+                self.tensorboard.add_scalar('gru/accuracy_final',reward_accuracy, i)
             num_steps = timesteps_per_iteration
             if i == self.num_iterations - 1:
                 num_steps += extra_timesteps

@@ -40,8 +40,10 @@ class RecurrentBufferingWrapper(BufferingWrapper):
                  ep_history: int = 100,
                  member: int = 1):
         super().__init__(venv, error_on_premature_reset)
-        
-        single_hidden_state_shape = (reward_fn.gru.num_layers * member, self.venv.num_envs, reward_fn.gru.hidden_size)
+        if member == 1:
+            single_hidden_state_shape = (reward_fn.gru.num_layers, self.venv.num_envs, reward_fn.gru.hidden_size)
+        else:
+            single_hidden_state_shape = (member, reward_fn.gru.num_layers, self.venv.num_envs, reward_fn.gru.hidden_size)
         _last_states = th.zeros(single_hidden_state_shape, device=reward_fn.device)
         self.reward_fn = reward_fn.predict_processed
         self.hidden_states = deepcopy(_last_states)

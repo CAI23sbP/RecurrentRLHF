@@ -46,3 +46,10 @@ https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/37374598-a2a4-43c8-9a
 
 https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/ed2f1cf2-7529-4fce-a49b-7a8968ef5587
 
+## My sister project (related to GRU) ## 
+
+GRU-PPO for stable-baselines3 
+
+https://github.com/CAI23sbP/GRU_AC/tree/master
+
+

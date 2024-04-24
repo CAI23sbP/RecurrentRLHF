@@ -12,7 +12,7 @@ from stable_baselines3.common import preprocessing
 from torch import nn
 
 from imitation.util import networks, util
-from imitation.rewards.reward_nets import RewardNet, RewardEnsemble
+from imitation.rewards.reward_nets import RewardNet, RewardEnsemble, NormalizedRewardNet
 
 class DictRewardNet(RewardNet):
 
@@ -94,7 +94,7 @@ class DictRewardNet(RewardNet):
             with torch.no_grad():
                 rew_th = self(state_th, action_th, next_state_th, done_th)
 
-            for state_ in state_th.values(): 
+            for _,state_ in state_th.items(): 
                 assert rew_th.shape == state_.shape[:1]
             return rew_th
 
@@ -173,3 +173,34 @@ class DictRewardEnsemble(RewardEnsemble):
         var_reward = all_rewards.var(-1, ddof=1)
         assert mean_reward.shape == var_reward.shape == (batch_size,)
         return mean_reward, var_reward
+
+
+class DictNormalizedRewardNet(NormalizedRewardNet):
+    
+    def predict_processed(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        update_stats: bool = True,
+        **kwargs,
+    ) -> np.ndarray:
+
+        with networks.evaluating(self):
+            # switch to eval mode (affecting normalization, dropout, etc)
+            rew_th = torch.tensor(
+                self.base.predict_processed(state, action, next_state, done, **kwargs),
+                device=self.device,
+            )
+            rew = self.normalize_output_layer(rew_th).detach().cpu().numpy().flatten()
+        if update_stats:
+            with torch.no_grad():
+                self.normalize_output_layer.update_stats(rew_th)
+        for key, _ in state.items():
+            if isinstance(state, dict):
+                assert rew.shape == state[key].shape[:1]
+        return rew
+
+
+

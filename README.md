@@ -5,11 +5,10 @@
 ## Addition ##
 
 To support Dict type observation, added ```dict_preference.py``` and ```dict_reward_nets.py```.
+            
+GRU reward net: you can use dict type obs
 
-            dict obs
-GRU          support [o]
-
-Non-GRU      support [o]
+Non-GRU reward net: you can use dict type obs
  
 
 ## How to Train ## 

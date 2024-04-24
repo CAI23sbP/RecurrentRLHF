@@ -30,7 +30,7 @@ imitation: 1.0.0
 
 stable_baselines3: 2.3.0
 
-## result in MountainCar(w/ variable horizon)
+## result in MountainCar(w/o variable horizon and w/o ensemble)
 ![image](https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/e64e7635-937c-4f58-bb2d-d78f8d7d54fe)
 
 1. GRU
@@ -45,6 +45,19 @@ https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/37374598-a2a4-43c8-9a
 
 
 https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/ed2f1cf2-7529-4fce-a49b-7a8968ef5587
+
+
+## result in MountainCar(w/o variable horizon and w ensemble)
+
+
+
+https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/6643f5ca-4fa0-4b67-8bff-55dab21ada14
+
+
+
+https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/4e4e2ea5-5893-4d0a-8c3d-038e11ec250a
+
+
 
 ## My sister project (related to GRU) ## 
 

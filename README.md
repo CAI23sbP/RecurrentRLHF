@@ -50,12 +50,14 @@ https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/ed2f1cf2-7529-4fce-a4
 ## result in MountainCar(w/o variable horizon and w/ ensemble)
 
 
-
+1. GRU w/ ensemble
+   
 https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/6643f5ca-4fa0-4b67-8bff-55dab21ada14
 
 
 
-
+2. No GRU w/ ensemble
+   
 https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/4e4e2ea5-5893-4d0a-8c3d-038e11ec250a
 
 

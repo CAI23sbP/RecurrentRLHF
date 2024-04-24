@@ -30,8 +30,14 @@ imitation: 1.0.0
 
 stable_baselines3: 2.3.0
 
-## result in MountainCar(w/o variable horizon and w/o ensemble)
+## result in MountainCar (w/o variable horizon and w/o ensemble)
+
+[Note]
+
+To make a fixed horizon, i used a ```AbsorbAfterDoneWrapper``` which is from [seals](https://github.com/HumanCompatibleAI/seals/blob/master/src/seals/util.py).
+
 ![image](https://github.com/CAI23sbP/RecurrentRLHF/assets/108871750/e64e7635-937c-4f58-bb2d-d78f8d7d54fe)
+
 
 1. GRU
    

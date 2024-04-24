@@ -1,6 +1,15 @@
  Custom imitation library for making a RecurrentReward model. 
- I used GRU. 
  
+ I used GRU. 
+
+## Addition ##
+
+To support Dict type observation, added ```dict_preference.py``` and ```dict_reward_nets.py```.
+
+            dict obs
+GRU          support [o]
+
+Non-GRU      support [o]
  
 
 ## How to Train ## 

@@ -5,8 +5,9 @@
 
 ## How to Train ## 
 
-No Ensembling ```python3 train.py``` 
-Ensemblign ```python3 train_ensemble.py```
+No Ensembling train ```python3 train.py``` 
+
+Ensembling train ```python3 train_ensemble.py```
 
 ## setting your reward network ##
 

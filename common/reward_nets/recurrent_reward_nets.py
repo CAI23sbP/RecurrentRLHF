@@ -156,7 +156,7 @@ class DictRecurrentRewardNet(DictRewardNet):
         action_space: gym.Space,
         normalize_images: bool = True,
     ):
-        super().__init__(self, observation_space ,action_space,normalize_images)
+        super().__init__(observation_space ,action_space,normalize_images)
 
     def preprocess(
         self,

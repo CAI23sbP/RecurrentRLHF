@@ -91,6 +91,7 @@ class RecurrentBufferingWrapper(BufferingWrapper):
         acts, self._saved_acts = self._saved_acts, None
         obs_fixed = []
         obs, old_rews, dones, infos = self.venv.step_wait()
+        obs = maybe_wrap_in_dictobs(obs)
         for single_obs, single_done, single_infos in zip(obs, dones, infos):
             if single_done:
                 single_obs = single_infos["terminal_observation"]
@@ -101,14 +102,12 @@ class RecurrentBufferingWrapper(BufferingWrapper):
             if isinstance(obs, DictObs)
             else np.stack(obs_fixed)
         )
-
         self.n_transitions += self.num_envs
         self._timesteps += 1
         ep_lens = self._timesteps[dones]
         if len(ep_lens) > 0:
             self._ep_lens += list(ep_lens)
         self._timesteps[dones] = 0
-
         rews, self.hidden_states = self.reward_fn(self._old_obs , 
                                                acts,  
                                                maybe_unwrap_dictobs(obs_fixed),

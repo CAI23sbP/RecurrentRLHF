@@ -156,7 +156,7 @@ class DictRecurrentRewardNet(DictRewardNet):
         action_space: gym.Space,
         normalize_images: bool = True,
     ):
-        super().__init__(observation_space ,action_space,normalize_images)
+        super().__init__( observation_space ,action_space,normalize_images)
 
     def preprocess(
         self,
@@ -170,11 +170,11 @@ class DictRecurrentRewardNet(DictRewardNet):
         hidden_th = util.safe_to_tensor(hidden_state).to(self.device)
         del hidden_state
         hidden_th = hidden_th.to(th.float32)
-        state_th, action_th, next_state_th, done_th = super().preprocess(self, 
-                                                                               state= state, 
-                                                                               action = action, 
-                                                                               next_state = next_state, 
-                                                                               done= done)
+        state_th, action_th, next_state_th, done_th = super().preprocess(
+                                                                        state= state, 
+                                                                        action = action, 
+                                                                        next_state = next_state, 
+                                                                        done= done)
         
         return state_th, action_th, next_state_th, done_th, hidden_th
 

@@ -1,27 +1,30 @@
-from imitation.algorithms import preference_comparisons  
-from common.data.recurrent_types import RecurrentTrajectoryWithRew , RecurrentTrajectoryWithRewPair
-import numpy as np 
-from imitation.util import logger as imit_logger
-from imitation.data.rollout import flatten_trajectories, make_sample_until, generate_trajectories, discounted_sum
 from stable_baselines3.common import base_class, type_aliases, utils, vec_env
-from imitation.rewards import reward_function, reward_nets
-import torch as th 
+from stable_baselines3.common.type_aliases import MaybeCallback
+
 from typing import Sequence, Any, Optional, Union, Tuple, cast, NoReturn, overload
-from common.wrapper.recurrent_buffering_wrapper import RecurrentBufferingWrapper
-from common.data.recurrent_rollout import * 
-from common.data.recurrent_types import RecurrentTrajectoryPair, RecurrentTransitions
+from .common.data.recurrent_types import RecurrentTrajectoryWithRew , RecurrentTrajectoryWithRewPair
+from .common.wrappers.recurrent_buffering_wrapper import RecurrentBufferingWrapper
+from .common.data.recurrent_rollout import * 
+from .common.data.recurrent_types import RecurrentTrajectoryPair, RecurrentTransitions
+from .common.reward_nets import recurrent_reward_nets
 from imitation.util import util
 from imitation.data.types import AnyPath, Pair, assert_not_dictobs
+from imitation.regularization import regularizers
+from imitation.policies import exploration_wrapper
+from imitation.util import logger as imit_logger
+from imitation.data.rollout import flatten_trajectories, make_sample_until, generate_trajectories, discounted_sum
+from imitation.algorithms import preference_comparisons  
+from imitation.rewards import reward_function, reward_nets
+
 from scipy import special
 from tqdm.auto import tqdm
+import torch as th 
 import torch.nn as nn 
 import pickle, re, math 
-from imitation.regularization import regularizers
+import numpy as np 
+
 from torch.utils import data as data_th
-from stable_baselines3.common.type_aliases import MaybeCallback
 from collections import defaultdict
-from imitation.policies import exploration_wrapper
-from common.reward_nets import recurrent_reward_nets
 
 class RecurrentTrajectoryGenerator(preference_comparisons.TrajectoryGenerator):
     def sample(self, steps: int) -> Sequence[RecurrentTrajectoryWithRew]:
@@ -213,7 +216,7 @@ class RecurrentPreferenceModel(nn.Module):
         if isinstance(base_model, recurrent_reward_nets.RecurrentRewardEnsemble):
             is_base = model is base_model
             is_std_wrapper = (
-                isinstance(model, recurrent_reward_nets.RecurrentAddSTDRewardWrapper)
+                isinstance(model, reward_nets.AddSTDRewardWrapper)
                 and model.base is base_model
             )
 
@@ -1080,3 +1083,33 @@ class RecurrentPreferenceComparisons(base.BaseImitationAlgorithm):
             self._iteration += 1
 
         return {"reward_loss": reward_loss, "reward_accuracy": reward_accuracy}
+
+class DictRecurrentPreferenceModel(RecurrentPreferenceModel):
+    
+    def rewards(self, transitions: RecurrentTransitions) -> th.Tensor:
+
+        state = transitions.obs
+        action = transitions.acts
+        next_state = transitions.next_obs
+        done = transitions.dones
+        hidden_state = transitions.hidden_states
+        if self.ensemble_model is not None:
+            rews_np, _ = self.ensemble_model.predict_processed_all(
+                state,
+                action,
+                next_state,
+                done,
+                hidden_state
+            )
+            assert rews_np.shape == (len(state), self.ensemble_model.num_members)
+            rews = util.safe_to_tensor(rews_np).to(self.ensemble_model.device)
+
+        else:
+            if len(hidden_state.shape)>3:
+                hidden_state = hidden_state[self.member_indx].swapaxes(0,1)
+            preprocessed = self.model.preprocess(state, action, next_state, done, hidden_state)
+            rews, _ = self.model(*preprocessed)
+            for key, state_ in state.items():
+                if isinstance(state, dict):
+                    assert rews.shape == (len(state_[key]),)
+        return rews

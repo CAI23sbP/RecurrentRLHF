@@ -43,9 +43,9 @@ class DictRecurrentPreferenceModel(recurrent_preference.RecurrentPreferenceModel
     
     def rewards(self, transitions: RecurrentTransitions) -> th.Tensor:
 
-        state = assert_not_dictobs(transitions.obs)
+        state = transitions.obs
         action = transitions.acts
-        next_state = assert_not_dictobs(transitions.next_obs)
+        next_state = transitions.next_obs
         done = transitions.dones
         hidden_state = transitions.hidden_states
         if self.ensemble_model is not None:

@@ -148,7 +148,7 @@ class RecurrentRewardNet(RewardNet):
         return self.predict(state, action, next_state, done, hidden_state)
 
 
-class DictRecurrentRewardNet(RecurrentRewardNet, DictRewardNet):
+class DictRecurrentRewardNet(DictRewardNet):
 
     def __init__(
         self,
@@ -156,9 +156,7 @@ class DictRecurrentRewardNet(RecurrentRewardNet, DictRewardNet):
         action_space: gym.Space,
         normalize_images: bool = True,
     ):
-        
-        RecurrentRewardNet.__init__(observation_space ,action_space )
-        DictRewardNet.__init__(observation_space ,action_space)
+        super().__init__(self, observation_space ,action_space,normalize_images)
 
     def preprocess(
         self,
@@ -169,14 +167,54 @@ class DictRecurrentRewardNet(RecurrentRewardNet, DictRewardNet):
         hidden_state: np.ndarray
 
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        
         hidden_th = util.safe_to_tensor(hidden_state).to(self.device)
         del hidden_state
         hidden_th = hidden_th.to(th.float32)
-        state_th, action_th, next_state_th, done_th = DictRewardNet.preprocess(state, action, next_state, done)
+        state_th, action_th, next_state_th, done_th = super().preprocess(self, 
+                                                                               state= state, 
+                                                                               action = action, 
+                                                                               next_state = next_state, 
+                                                                               done= done)
         
         return state_th, action_th, next_state_th, done_th, hidden_th
+
+    @staticmethod
+    def _process_sequence(
+        features: th.Tensor,
+        hidden_state: th.Tensor,
+        episode_starts: th.Tensor,
+        gru: nn.GRU,
+    ) -> Tuple[th.Tensor, th.Tensor]:
+        n_seq = hidden_state.shape[1]
+        features_sequence = features.reshape((n_seq, -1, gru.input_size)).swapaxes(0, 1)
+        episode_starts = episode_starts.reshape((n_seq, -1)).swapaxes(0, 1)
+        if th.all(episode_starts == 0.0):
+
+            gru_output, hidden_state = gru(features_sequence, hidden_state)
+            gru_output = th.flatten(gru_output.transpose(0, 1), start_dim=0, end_dim=1)
+            return gru_output, hidden_state
+        
+        gru_output = []
+        for features, episode_start in zip_strict(features_sequence, episode_starts):
+            gru_hidden, hidden_state = gru(features.unsqueeze(dim=0), (1.0 - episode_start).view(1, n_seq, 1) * hidden_state)
+            gru_output += [gru_hidden]
+        # Sequence to batch
+        gru_output = th.flatten(th.cat(gru_output).transpose(0, 1), start_dim=0, end_dim=1)
+        return gru_output, hidden_state
     
+    def predict_processed(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        hidden_state: np.ndarray,
+        **kwargs,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        
+        del kwargs
+        return self.predict(state, action, next_state, done, hidden_state)
+
     def predict_th(
         self,
         state: np.ndarray,
@@ -211,19 +249,6 @@ class DictRecurrentRewardNet(RecurrentRewardNet, DictRewardNet):
     ) -> Tuple[np.ndarray, np.ndarray]:
         rew_th, hidden_th = self.predict_th(state, action, next_state, done, hidden_state)
         return rew_th.detach().cpu().numpy().flatten(), hidden_th.detach().cpu().numpy()
-
-    def predict_processed(
-        self,
-        state: np.ndarray,
-        action: np.ndarray,
-        next_state: np.ndarray,
-        done: np.ndarray,
-        hidden_state: np.ndarray,
-        **kwargs,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        
-        del kwargs
-        return self.predict(state, action, next_state, done, hidden_state)
 
 import abc 
 
@@ -318,6 +343,31 @@ class RecurrentNormalizedRewardNet(RecurrentPredictProcessedWrapper):
         assert rew.shape == state.shape[:1]
         return rew, hidden_th
 
+class DictRecurrentNormalizedRewardNet(RecurrentPredictProcessedWrapper):
+
+    def predict_processed(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: np.ndarray,
+        done: np.ndarray,
+        hidden_state:np.ndarray,
+        **kwargs,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        with networks.evaluating(self):
+            rew, hidden_state = self.base.predict_processed(state, action, next_state, done, hidden_state, **kwargs)
+            rew_th = th.tensor(rew, device=self.device)
+            hidden_th = th.tensor(hidden_state, device=self.device)
+            rew = self.normalize_output_layer(rew_th).detach().cpu().numpy().flatten()
+        if self.update_stats:
+            with th.no_grad():
+                self.normalize_output_layer.update_stats(rew_th)
+
+        for key, _ in state.items():
+            if isinstance(state, dict):
+                assert rew.shape == state[key].shape[:1]
+        return rew, hidden_th
+    
 class RecurrentRewardEnsemble(RewardNetWithVariance):
 
     members: nn.ModuleList
@@ -427,21 +477,33 @@ class RecurrentRewardEnsemble(RewardNetWithVariance):
         return mean, hidden_states
 
 class DictRecurrentRewardEnsemble(RecurrentRewardEnsemble):    
+    
+    def __init__(
+        self,
+        observation_space: gym.Space,
+        action_space: gym.Space,
+        members: Iterable[RewardNet],
+    ):
+        super().__init__(observation_space, action_space, members)
+        
     def predict_processed_all(
         self,
         state: np.ndarray,
         action: np.ndarray,
         next_state: np.ndarray,
         done: np.ndarray,
-        hidden_state: np.ndarray, 
+        hidden_states: np.ndarray, 
+        for_batch: bool = True,
         **kwargs,
     ) -> np.ndarray:
 
         for key, item in state.items():
             batch_size = item.shape[0]
-
         rewards_list = []
         hidden_state_list = []
+        
+        if for_batch:
+            hidden_states = hidden_states.swapaxes(1,2)
         for (member, hidden_state) in zip(self.members, hidden_states):
             single_reward, single_hidden_state = member.predict_processed(state, action, next_state, done, hidden_state, **kwargs)
             rewards_list.append(single_reward)
@@ -449,9 +511,9 @@ class DictRecurrentRewardEnsemble(RecurrentRewardEnsemble):
 
         rewards: np.ndarray = np.stack(rewards_list, axis=-1)
         hidden_states: np.ndarray = np.stack(hidden_state_list, axis= 0)
-
         assert rewards.shape == (batch_size, self.num_members)
         return rewards, hidden_states
+    
     
     @th.no_grad()
     def predict_reward_moments(
@@ -473,6 +535,7 @@ class DictRecurrentRewardEnsemble(RecurrentRewardEnsemble):
             next_state,
             done,
             hidden_state,
+            for_batch = False,
             **kwargs,
         )
         mean_reward = all_rewards.mean(-1)

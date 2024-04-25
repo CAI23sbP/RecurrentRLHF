@@ -12,7 +12,7 @@ from imitation.data.types import AnyPath, Pair, assert_not_dictobs
 from imitation.regularization import regularizers
 from imitation.policies import exploration_wrapper
 from imitation.util import logger as imit_logger
-from imitation.data.rollout import flatten_trajectories, make_sample_until, generate_trajectories, discounted_sum
+from imitation.data.rollout import make_sample_until, generate_trajectories, discounted_sum
 from imitation.algorithms import preference_comparisons  
 from imitation.rewards import reward_function, reward_nets
 
